@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MyopiaDarshan - Myopia Simulator</title>
+  <style>
+    /* ==========================
+       Styling Variables & Reset
+       ========================== */
+    :root{
+      --bg:#0c1322; --panel:#111a2c; --text:#eaf0ff;
+      --muted:#9fb0d1; --line:#1b2a46; --accent:#7aa2ff
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; font-family:ui-sans-serif,system-ui,Segoe UI,Inter,Roboto,Arial;
+      background:radial-gradient(1200px 800px at 70% -10%,#13223e 0%,var(--bg) 65%);
+      color:var(--text); min-height:100vh;
+      display:grid; grid-template-rows:auto 1fr;
+    }
+    header{
+      padding:14px 16px; display:flex; gap:10px; align-items:center;
+      font-weight:600; font-size:18px
+    }
+    .wrap{max-width:1000px;margin:0 auto;padding:16px;display:grid;gap:16px}
+
+    /* ==========================
+       Controls & Sliders
+       ========================== */
+    .controls{display:grid;grid-template-columns:1fr;gap:12px;padding:12px;
+              background:var(--panel);border-radius:12px;border:1px solid var(--line)}
+    .row{display:flex;align-items:center;gap:10px}
+    label{width:130px;color:var(--muted);font-size:13px}
+    input[type=range]{width:100%}
+    .stat{font-size:12px;color:var(--muted);width:60px;text-align:right}
+
+    /* ==========================
+       Video & Canvas Display
+       ========================== */
+    .viewbox{display:grid;grid-template-columns:1fr 1fr;gap:2px;border-radius:12px;overflow:hidden;border:1px solid var(--line)}
+    .cell{background:var(--panel);position:relative;display:grid;place-items:center}
+    .cell header{
+      position:absolute;left:8px;top:8px;padding:4px 8px;background:rgba(0,0,0,.45);
+      backdrop-filter:blur(6px);border-radius:10px;font-size:12px;font-weight:600
+    }
+    video,canvas{display:block;width:100%;height:100%;object-fit:cover}
+    video{position:absolute;inset:0;opacity:0;pointer-events:none}
+
+    /* ==========================
+       Buttons & Alerts
+       ========================== */
+    .btn{margin-left:auto;background:#17233b;color:var(--text);
+         border:1px solid #223053;border-radius:10px;padding:8px 12px;
+         font-weight:600;cursor:pointer;transition:.2s}
+    .btn:hover{background:#1b2a47;border-color:#2e4477;transform:scale(1.03)}
+    .alert{background:#ff5252;color:#fff;padding:10px 14px;border-radius:10px;
+           text-align:center;font-size:14px;display:none}
+  </style>
+</head>
+<body>
+  <header>MyopiaDarshan - Myopia Simulator</header>
+  <main class="wrap">
+
+    <!-- Camera permission alert -->
+    <div class="alert" id="alert">
+      Camera access required. Please allow camera permission in your browser and ensure HTTPS or localhost.
+    </div>
+
+    <!-- Controls for diopters & distance -->
+    <div class="controls">
+      <div class="row">
+        <label for="diopters">Spherical Power (D)</label>
+        <input id="diopters" type="range" min="-8" max="0" step="0.25" value="-2">
+        <span id="dVal" class="stat">-2.00 D</span>
+      </div>
+      <div class="row">
+        <label for="distance">Viewing Distance</label>
+        <input id="distance" type="range" min="1" max="50" step="0.5" value="10">
+        <span id="distVal" class="stat">10 ft</span>
+        <button id="infinityBtn" class="btn">∞ Distance</button>
+      </div>
+      <div class="row">
+        <label>Far-Point</label><span id="farPoint" class="stat">1.64 ft</span>
+        <label style="margin-left:20px">Blur Radius</label><span id="blurPx" class="stat">0 px</span>
+        <button id="switch" class="btn">Switch Camera</button>
+      </div>
+    </div>
+
+    <!-- Video and simulation view -->
+    <div class="viewbox">
+      <div class="cell">
+        <header>Normal Vision</header>
+        <video id="video" playsinline autoplay muted></video>
+        <canvas id="left"></canvas>
+      </div>
+      <div class="cell">
+        <header>Myopic Simulation</header>
+        <canvas id="right"></canvas>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    // ==========================
+    // Grab all elements
+    // ==========================
+    const els={
+      video:document.getElementById('video'),
+      left:document.getElementById('left'),
+      right:document.getElementById('right'),
+      diopters:document.getElementById('diopters'),
+      dVal:document.getElementById('dVal'),
+      distance:document.getElementById('distance'),
+      distVal:document.getElementById('distVal'),
+      farPoint:document.getElementById('farPoint'),
+      blurPx:document.getElementById('blurPx'),
+      switchBtn:document.getElementById('switch'),
+      alert:document.getElementById('alert'),
+      infinityBtn:document.getElementById('infinityBtn')
+    };
+
+    let stream=null; 
+    let usingBack=true; // Toggle between front/back camera
+    let raf=null;
+
+    // ==========================
+    // Calculate blur based on myopia
+    // D = Diopters, distFeet = viewing distance in feet
+    // Returns far-point in ft and blur radius in px
+    // ==========================
+    function blurFromMyopia(D,distFeet){
+      if(D===0) return {far:Infinity, px:0};
+      const farMeters = 1/Math.abs(D); // Far-point in meters
+      const farFeet = farMeters * 3.28084; // Convert to feet
+      const beyond = Math.max(0, distFeet - farFeet); // Amount beyond far-point
+      return {far: farFeet, px: Math.min(60, beyond*22)}; // max blur 60px
+    }
+
+    // ==========================
+    // Update UI labels
+    // ==========================
+    function updateLabels(){
+      const D = Number(els.diopters.value);
+      const distFeet = Number(els.distance.value);
+      els.dVal.textContent = `${D.toFixed(2)} D`;
+      els.distVal.textContent = `${distFeet.toFixed(1)} ft`;
+      const {far, px} = blurFromMyopia(D, distFeet);
+      els.farPoint.textContent = far===Infinity?'∞':`${far.toFixed(2)} ft`;
+      els.blurPx.textContent = `${px.toFixed(1)} px`;
+    }
+
+    // ==========================
+    // Start camera safely
+    // ==========================
+    async function startCamera(){
+      try{
+        if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+          throw new Error('Camera API not supported');
+        }
+        if(stream) stream.getTracks().forEach(t=>t.stop()); // Stop previous stream
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio:false,
+          video:{facingMode:usingBack?'environment':'user', width:{ideal:1280}, height:{ideal:720}}
+        });
+        els.video.srcObject = stream;
+        els.alert.style.display = 'none';
+      } catch(e){
+        els.alert.style.display = 'block';
+        console.error('Camera error', e);
+      }
+    }
+
+    // ==========================
+    // Draw video & apply blur for myopia simulation
+    // ==========================
+    function draw(){
+      const vid = els.video;
+      if(!vid.videoWidth){ raf = requestAnimationFrame(draw); return; }
+      const w = vid.videoWidth, h = vid.videoHeight;
+
+      // Set canvas dimensions
+      if(els.left.width !== w){ els.left.width = w; els.left.height = h; }
+      if(els.right.width !== w){ els.right.width = w; els.right.height = h; }
+
+      const L = els.left.getContext('2d');
+      const R = els.right.getContext('2d');
+
+      // Draw normal vision
+      L.filter = 'none';
+      L.drawImage(vid,0,0,w,h);
+
+      // Draw myopic simulation
+      const D = Number(els.diopters.value);
+      const distFeet = Number(els.distance.value);
+      const {px} = blurFromMyopia(D, distFeet);
+      R.filter = `blur(${px.toFixed(2)}px)`;
+      R.drawImage(vid,0,0,w,h);
+      R.filter='none';
+
+      raf = requestAnimationFrame(draw);
+    }
+
+    // ==========================
+    // Event listeners
+    // ==========================
+    ['input','change'].forEach(ev=>{
+      els.diopters.addEventListener(ev, updateLabels);
+      els.distance.addEventListener(ev, updateLabels);
+    });
+
+    els.switchBtn.addEventListener('click', async()=>{
+      usingBack = !usingBack;
+      await startCamera();
+    });
+
+    els.infinityBtn.addEventListener('click', ()=>{
+      els.distance.value = 50; // Set to max 50 ft
+      updateLabels();
+    });
+
+    // ==========================
+    // Initialize simulator
+    // ==========================
+    (async()=>{
+      updateLabels();
+      await startCamera();
+      draw();
+    })();
+
+  </script>
+</body>
+</html>
